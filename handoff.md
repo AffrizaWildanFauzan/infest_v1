@@ -210,6 +210,76 @@ Kalau tetap +10pp, hipotesis warna juga gugur - JANGAN submit, laporkan saja.
 
 ---
 
+---
+
+## 1e. HASIL v6 (LB 0.81054) DAN KALIBRASI ULANG -> v7
+
+v6 belum disubmit; v5 memberi LB 0.81054 (dari 0.8073). Perbaikan pembobotan
+populasi hanya menyumbang +0.003, jadi hipotesis populasi gugur (lihat 1d).
+
+### Bangku uji ketahanan korupsi (n=943)
+
+Dibangun dari 25% train yang DIRUSAK dgn korupsi ditera ke statistik test.
+Daya statistik jauh lebih baik dari bangku 177-gambar (sd 0.036 -> ~0.015).
+
+PENTING - kesalahan kalibrasi yang ditemukan dan diperbaiki:
+- `DEGRADE` v6 ternyata 3.3x TERLALU KUAT (median ketajaman train+degrade 762
+  vs test 2549). Model akan belajar membaca citra lebih buruk dari yang akan
+  ditemuinya.
+- Bangku uji versi pertama juga 4.5x terlalu rusak. Hasil spektakuler
+  0.157 -> 0.883 yang sempat dilaporkan TIDAK BERLAKU untuk masalah nyata.
+
+Setelah KEDUANYA ditera ulang (bangku rasio 1.08x vs test asli):
+
+```
+[A] augmentasi v5 (RGB)                macro-F1 0.4306  skew 34.68pp
+[B] grayscale + degrade k=0.30         macro-F1 0.9032  skew  1.59pp
+[C] B + DAE (penormal masukan)         macro-F1 0.9119  skew  1.70pp
+```
+
+KESIMPULAN: grayscale + degradasi terkalibrasi = +0.47 macro-F1, jauh di atas
+derau. DAE = +0.0087, DI BAWAH derau (sd 0.015) dengan biaya +1.5-2.5 jam GPU
+(dilatih 25x: 5 model x 5 fold) -> TIDAK DIPAKAI, USE_DAE=False.
+
+### Setelan v7 (perubahan dari v6)
+
+```python
+DEGRADE = dict(p_blur=0.70, blur=(0.18, 0.66),        # dulu (0.6, 2.2)
+               p_contrast=0.60, contrast=(0.45, 0.95),
+               p_rescale=0.50, rescale=(0.55, 0.90),  # dulu (0.35, 0.80)
+               p_jpeg=0.50, jpeg=(40, 90))            # dulu (25, 88)
+USE_DAE = False
+```
+
+### Ide lain yang DIUJI DAN GUGUR (jangan diulang)
+
+- Retrieval duplikat test<->train: hanya 0.6% gambar test punya kembaran dekat
+  (kemiripan >=0.95); 3.6% pada ambang longgar 0.80. Potensi terlalu kecil.
+- Tiling resolusi asli untuk gambar blok: coretan di test blok tetap 7.4 px
+  setelah letterbox 384 (train 8.8 px). Tidak ada detail yang hilang.
+- AugMix: 0.7513 vs degradasi bertarget 0.9032 (bangku salah tera) - kalah.
+- Pseudo-label naif: merugikan (-0.017, -0.025 direplikasi 2x).
+- tau / EM-SLD / temperature / prior oracle: semua merugikan (lihat 1d).
+
+### Keterbatasan yang tetap ada
+
+Korupsi di bangku uji adalah MODEL saya tentang korupsi test (blur, kontras,
+tint, oklusi, JPEG), ditera pada ketajaman dan porsi berwarna. Kalau test punya
+jenis kerusakan yang tidak dimodelkan, manfaatnya bisa berbeda. Semua angka
+diukur pada CNN kecil 48x192, bukan convnext 384.
+
+### Nama model fondasi (TERVERIFIKASI di HF Hub, untuk dicoba tim)
+
+- `vit_base_patch14_reg4_dinov2.lvd142m`  (patch 14 -> resolusi HARUS kelipatan 14)
+- `vit_base_patch16_clip_224.openai`
+- `eva02_base_patch14_224.mim_in22k`       (patch 14)
+- `vit_base_patch16_siglip_224.v2_webli`
+JEBAKAN: `siglip_base_patch16_224` TIDAK ADA; nama salah -> build() diam-diam
+fallback ke resnet34 tanpa error. Dan 384 TIDAK habis dibagi 14 -> pakai 378.
+Model-model ini 86M param (vs convnext_tiny 28.6M); pakai 224 agar runtime wajar.
+
+---
+
 ## 2. PENTING: dataset pernah diganti panitia
 
 Ada **dua dataset berbeda** dalam riwayat pengerjaan ini. Jangan tertukar.
