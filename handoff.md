@@ -19,6 +19,115 @@ model yang hanya jago di kelas mayoritas tidak diuntungkan.
 Submission: CSV dua kolom `image_id,label`, jumlah baris = jumlah gambar test.
 
 ---
+---
+
+## 1b. HASIL v3.1 DI DATASET BARU — temuan terpenting sejauh ini
+
+v3.1 dijalankan tim pada dataset baru dan menghasilkan:
+
+| | nilai |
+|---|---|
+| OOF macro-F1 (dilaporkan pipeline) | **0.9716** |
+| Skor Kaggle (private/public LB) | **0.8073** |
+| Selisih CV−LB | **0.164** |
+
+Sebagai pembanding, di dataset LAMA selisih CV−LB hanya 0.026. Jadi ini bukan
+overfitting biasa; ada yang salah secara struktural.
+
+### Penyebab: model salah MENGHITUNG, bukan salah MEMBACA
+
+Dari jumlah prediksi tiap kelas di submission v3.1 saja — tanpa tahu label test —
+batas atas macro-F1 bisa dihitung, dengan asumsi prior kelas test ≈ prior train:
+
+```
+kelas       true~   pred   F1 maks (recall=1.0)
+bali          128    102        0.887
+jawa          227    234        0.985
+jawi          253    173        0.812
+lampung       163    234        0.821
+lontara       131     97        0.851
+pegon         100    240        0.588   <-- diprediksi 2.4x lipat
+sunda         218    140        0.782
+----------------------------------------------
+plafon macro-F1                 0.8181
+```
+
+**Plafon 0.8181 vs skor nyata 0.8073 — selisih hanya 0.011.** Artinya model
+nyaris tidak kehilangan apa pun dari salah mengenali gambar; hampir SELURUH
+kerugian 0.19 berasal dari proporsi prediksi per kelas yang salah.
+
+Konsekuensi langsung: memperbaiki backbone/augmentasi/resolusi tidak akan banyak
+menolong. Yang harus diperbaiki adalah lapisan kalibrasi prior.
+
+Catatan asumsi: plafon di atas bergantung pada prior test ≈ prior train, yang
+TIDAK bisa diverifikasi (label test tidak tersedia). Kedekatan 0.8181 vs 0.8073
+adalah bukti tidak langsung yang kuat, bukan bukti langsung.
+
+### Bug: `tau` dipilih atas dasar gain NOL
+
+Output v3.1 mencatat:
+
+```
+F1 Macro OOF (argmax)     : 0.9702
+F1 Macro OOF (tau=0.20)   : 0.9702  (+0.0000)
+```
+
+Kode memakai perbandingan `if f > bf1` sehingga `tau=0.20` terpilih pada selisih
+di bawah 0.00005 (tingkat derau pembulatan). `tau` lalu DITERAPKAN ke test.
+Karena `prob / prior**tau` menaikkan kelas langka, dan pegon adalah kelas
+terlangka (8.19%), tau kemungkinan besar MEMPERBESAR over-prediksi pegon yang
+jadi sumber kerugian utama — semuanya tanpa bukti manfaat sama sekali.
+**Perbaikan: butuh margin minimum + validasi yang tahan pergeseran, atau cabut.**
+
+### Bug: spesialis diterapkan berlapis
+
+Di loop pemilihan ambang spesialis, `p2 = oof.copy()` membaca `oof` yang SUDAH
+dimodifikasi oleh ambang sebelumnya yang diterima. Akibatnya ambang-ambang
+berikutnya dievaluasi di atas probabilitas yang sudah disesuaikan, dan OOF yang
+dilaporkan sedikit lebih optimistis dari semestinya. Sudah diperbaiki (snapshot
+`oof_base` di luar loop, penugasan sekali di akhir).
+
+### Kenapa OOF 0.9716 menyesatkan
+
+OOF dihitung pada train (33% gambar 'blok'), sedangkan test 50% 'blok'. Kelas
+pegon sendiri 79.6% blok di train. Jadi OOF mengukur performa pada komposisi
+populasi yang berbeda dari yang dinilai Kaggle. Angkanya benar, tapi untuk soal
+yang berbeda. **Perbaikan: laporkan macro-F1 terpisah strip vs blok, dan bobot
+ulang OOF ke komposisi test sebelum memilih model/ensemble/ambang/tau.**
+
+---
+
+## 1c. Saran "pakai VAE karena test banyak noise" — DIUJI, premisnya salah
+
+Tim mengusulkan denoising (mis. variational autoencoder) dengan alasan gambar
+test banyak berderau. Ini diukur langsung, bukan diperdebatkan.
+
+Estimator noise Immerkaer (konvolusi Laplacian 3x3), jendela 64x64 pada
+**resolusi asli tanpa resize** (agar perbedaan ukuran gambar tidak menjadi
+penjelasan alternatif), 632 train vs 787 test:
+
+```
+sigma noise      p10    p25    p50    p75    p90
+TRAIN           2.79   6.26   9.01  12.56  18.60
+TEST            0.46   0.97   2.27   5.45  10.00
+median train = 9.01 | median test = 2.27 | rasio 0.25x
+Mann-Whitney p = 5.29e-89
+```
+
+Gambar test ~4x LEBIH BERSIH daripada train. Pada subpopulasi gambar besar saja
+(jendela 192x192, n=45/165) selisihnya tidak signifikan (p=0.42). Kesimpulan yang
+didukung data: **test tidak lebih berderau di kondisi mana pun.**
+
+Bukti pendukung dari eksperimen v3.1 sendiri: model terbaik adalah `cnext-lb`
+(letterbox 128x512, resolusi tertinggi, paling mempertahankan detail; OOF 0.9702)
+dan greedy memilihnya SENDIRIAN; dua model terburuk adalah heightnorm 64x256
+(0.9616 dan 0.9520). Kalau masalahnya derau, arahnya harus terbalik.
+
+"Noise" yang dirasakan tim sebenarnya adalah **heterogenitas domain** (foto
+halaman, screenshot, tabel vs potongan teks bersih) — itu pergeseran distribusi,
+bukan derau piksel, dan denoising tidak menanganinya.
+
+---
 
 ## 2. PENTING: dataset pernah diganti panitia
 
