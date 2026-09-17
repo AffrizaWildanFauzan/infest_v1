@@ -97,7 +97,17 @@ ulang OOF ke komposisi test sebelum memilih model/ensemble/ambang/tau.**
 
 ---
 
-## 1c. Saran "pakai VAE karena test banyak noise" — DIUJI, premisnya salah
+## 1c. KOREKSI: saran tim soal "noise" BENAR; pengukuran pertama saya salah
+
+PENTING untuk reviewer: bagian di bawah (ditandai [DIBANTAH]) adalah kesimpulan
+LAMA yang TERBUKTI KELIRU. Ringkasan yang benar ada di bagian 1d.
+
+Singkatnya: saya memakai estimator noise Immerkaer, yang mengukur derau
+frekuensi-TINGGI. Korupsi utama di test ternyata BLUR, yang justru MENURUNKAN
+nilai metrik itu. Jadi alat ukurnya buta terhadap jenis kerusakan yang ada, dan
+hasil "test 4x lebih bersih" adalah artefak pemilihan metrik, bukan fakta.
+
+### [DIBANTAH] kesimpulan lama
 
 Tim mengusulkan denoising (mis. variational autoencoder) dengan alasan gambar
 test banyak berderau. Ini diukur langsung, bukan diperdebatkan.
@@ -126,6 +136,77 @@ dan greedy memilihnya SENDIRIAN; dua model terburuk adalah heightnorm 64x256
 "Noise" yang dirasakan tim sebenarnya adalah **heterogenitas domain** (foto
 halaman, screenshot, tabel vs potongan teks bersih) — itu pergeseran distribusi,
 bukan derau piksel, dan denoising tidak menanganinya.
+
+---
+
+---
+
+## 1d. PENYEBAB SEBENARNYA: pintasan palsu berbasis WARNA
+
+Setelah v5 (yang memperbaiki pembobotan populasi strip/blok) hanya naik dari
+LB 0.8073 ke 0.81054 (+0.003), hipotesis populasi juga gugur. Pemeriksaan
+LANGSUNG pada gambar test (bukan statistik agregat) membuka penyebabnya.
+
+### Ukuran jarak domain (train vs test)
+
+```
+                                       TRAIN     TEST
+citra abu-abu murni (grayscale)        95.3%    36.8%    <- 63% test BERWARNA
+citra biner (>90% piksel hitam/putih)  45.2%    14.8%
+ketajaman (var Laplacian, median)      13101     2464    <- test 5.3x lebih buram
+```
+
+n=600 vs 600 (grayscale), n=495 vs 496 (ketajaman).
+
+### Mekanisme
+
+Porsi gambar berwarna per kelas DI TRAIN: pegon 11.3% (tertinggi), jawa 9.0%,
+bali 4.8%, lampung 4.4%, lontara 3.7%, jawi 2.2%, sunda 0.9% (terendah).
+
+Model belajar pintasan "berwarna -> pegon". Test 63% berwarna, jadi pintasan
+menyala terus. Korelasi %berwarna-train vs skew prediksi test:
+
+```
+v5   : Spearman rho = +0.893  (p=0.0068)
+v3.1 : Spearman rho = +0.857  (p=0.0137)     <- dua submission INDEPENDEN
+```
+
+Ini menjelaskan semua kegagalan sebelumnya sekaligus: model lebih kuat justru
+mempelajari pintasan LEBIH BAIK (v5 OOF 0.9795 vs v3.1 0.9702, LB praktis sama,
+kesepakatan prediksi 89.6%); OOF tidak melihatnya karena train 95% abu-abu;
+koreksi prior tidak bisa memperbaiki fitur palsu.
+
+### Uji terkontrol (latih pada train abu-abu, uji pada 177 train berwarna)
+
+```
+                              skew pegon      macro-F1 (n=177, sd derau 0.036)
+A  RGB apa adanya               -18.1pp          0.1305
+B  dipaksa abu-abu               -6.2pp          0.1798
+C  abu-abu + degradasi            0.0pp          0.1572
+```
+
+KESIMPULAN YANG SAH: intervensi menormalkan SEBARAN prediksi (efek besar,
+monoton, 1 gambar = 0.56pp jadi jauh di atas derau).
+KESIMPULAN YANG TIDAK SAH: bahwa akurasinya naik. Selisih macro-F1 di antara
+A/B/C berada DI DALAM derau (sd 0.036 pada n=177, sunda hanya n=6).
+
+### Kenapa sebaran itu yang menentukan skor
+
+Plafon macro-F1 yang dihitung HANYA dari jumlah prediksi per kelas:
+v3.1 plafon 0.8181 vs LB 0.8073; v5 plafon 0.8445 vs LB 0.8105. Keduanya
+mendarat tepat di bawah plafonnya sendiri. Jadi menormalkan sebaran menaikkan
+plafonnya, bukan sekadar kosmetik. (Asumsi: prior test ~ prior train; tidak
+dapat diverifikasi.)
+
+### Perubahan di v6
+
+1. `GRAYSCALE=True` - train DAN test dipaksa abu-abu (matikan sumbu warna)
+2. `degrade()` - blur/kontras/rescale/JPEG pada train, ditera ke statistik test
+3. `rand_jpeg()` lama diserap ke `degrade()` (JPEG saja tidak cukup; blur terbesar)
+
+Cara verifikasi TANPA submit: jalankan v6, lihat blok distribusi di akhir.
+Kalau skew pegon turun dari +10.00pp mendekati nol, mekanismenya bekerja.
+Kalau tetap +10pp, hipotesis warna juga gugur - JANGAN submit, laporkan saja.
 
 ---
 
