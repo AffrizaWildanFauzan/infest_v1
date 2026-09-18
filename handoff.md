@@ -280,6 +280,76 @@ Model-model ini 86M param (vs convnext_tiny 28.6M); pakai 224 agar runtime wajar
 
 ---
 
+---
+
+## 1f. HASIL v7: LB 0.83422 — dan penemuan bahwa AKURASI SUDAH MENTOK
+
+v7 (grayscale + degrade terkalibrasi) memberi LB 0.83422, naik +0.0237 dari v5.
+Kenaikan terbesar sejak dataset diganti.
+
+### Plafon: v7 praktis sudah maksimal
+
+Plafon macro-F1 dihitung HANYA dari jumlah prediksi per kelas (asumsi prior
+test ~ prior train):
+
+```
+versi   plafon    LB nyata   selisih   skew maks
+v3.1    0.8181    0.8073     -0.0108   11.48pp
+v5      0.8445    0.8105     -0.0339   10.00pp
+v7      0.8407    0.8342     -0.0065    9.59pp
+```
+
+v7 hanya 0.0065 di bawah plafonnya. Kenaikan +0.024 datang dari MENUTUP JARAK
+ke plafon (-0.034 -> -0.0065), BUKAN dari menaikkan plafon (0.8445 -> 0.8407,
+malah sedikit turun). Artinya: tidak ada lagi ruang dari perbaikan akurasi.
+Untuk melewati ~0.84, HARUS mengubah jumlah prediksi per kelas.
+
+### DUA kesalahan yang perlu diketahui reviewer
+
+1. GERBANG OTOMATIS SAYA SALAH DAN MERUGIKAN. Kode v6/v7 mencetak vonis
+   "skew >= 5pp -> hipotesis gugur, JANGAN submit". v7 skew-nya 9.59pp, jadi
+   divonis gagal. Tim submit tetap, dan skornya naik paling banyak. Kalau
+   gerbang itu dituruti, kenaikan +0.024 hilang. Kesalahan desain: menjadikan
+   satu indikator (skew) sebagai proksi untuk hal lain (skor), berdasar
+   hipotesis yang belum teruji. ABAIKAN vonisnya; angkanya tetap berguna.
+
+2. MEKANISME "PINTASAN WARNA" TIDAK TERBUKTI. Grayscale dimatikan, skew pegon
+   hanya bergerak 10.00 -> 9.59pp. Nyaris nol. Jadi warna BUKAN penyebab skew.
+   Intervensinya menolong lewat jalur lain (ketahanan blur/degradasi).
+   Korelasi rho=0.89 ternyata korelasi tanpa kausalitas.
+
+### Metode tambahan yang DIUJI SETELAH v7 dan tidak terbukti
+
+```
+oklusi poligon dalam degrade()   0.9060 vs 0.9084 tanpa  -> -0.0024 (derau)
+decoding berbatas (kuota train)  0.9066 vs 0.9084        -> TIDAK BERMAKNA:
+decoding berbatas (kuota oracle) 0.9074 vs 0.9084           bangku uji skew-nya
+                                                            cuma 2pp, tak ada
+                                                            yang perlu dibetulkan
+```
+
+Oklusi buatan MEMANG ada di test (18.3% gambar, luas median 9.8%, abu-abu
+110-196, bentuk poligon) dan TIDAK ada di degrade(). Tapi melatihnya tidak
+menolong di bangku uji yang justru mengandung oklusi di sisi pengujian.
+
+Decoding berbatas TIDAK BISA diuji dari bangku ini (bangku tidak mereproduksi
+skew 9.59pp). Statusnya: belum teruji, bukan gagal.
+
+### Mutu data train
+
+Hanya 4 dari 3771 gambar bermasalah (1 hitam total, 3 nyaris tanpa tinta).
+0.11% - tidak signifikan, tidak perlu ditangani.
+
+### Rekomendasi
+
+Slot 1: v7 apa adanya (0.8342, angka nyata).
+Slot 2 (kalau ada): submission_kuota.csv dgn ALPHA=0.5 - taruhan pada
+satu-satunya tuas tersisa yang menyentuh plafon.
+Jangan tambah metode akurasi lagi: 7 metode diuji, 0 terbukti, dan sisa ruang
+hanya 0.0065.
+
+---
+
 ## 2. PENTING: dataset pernah diganti panitia
 
 Ada **dua dataset berbeda** dalam riwayat pengerjaan ini. Jangan tertukar.
