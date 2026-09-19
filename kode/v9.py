@@ -573,6 +573,53 @@ for t, v in w.sort_values(ascending=False).items(): print(f"      {t:14s} {v*100
 print(f"    model tunggal terbaik: {single} (OOF-tertimbang={popf1(oof_by[single], mask):.4f})")
 oof = np.mean([oof_by[t] for t in chosen], 0); test_prob = np.mean([test_by[t] for t in chosen], 0)
 
+# ---- [#204 kalibrasi suhu] + [#206/#208 product fusion] --------------------
+# Dua metode dari daftar 300. Rata-rata aritmetik memaksa model yang RAGU ikut
+# menarik hasil; perkalian (rata-rata geometrik) memberi hak veto pada model yang
+# yakin-salah-sedikit dan lebih menghargai kesepakatan. Suhu ditala per model via
+# NLL di OOF (bukan via F1: suhu TIDAK mengubah argmax satu model, hanya bobotnya
+# saat digabung). Keempat kombinasi diadu di OOF TERTIMBANG; default 'rata-rata
+# mentah' hanya diganti kalau unggul > 0.002. Ini gerbangnya, bukan keyakinan.
+print("\n" + "="*70 + "\nSTEP 4a - CARA FUSI ENSEMBLE (kalibrasi + produk)\n" + "="*70)
+def _temp(p, T):
+    l = np.log(np.maximum(p, 1e-12)) / T
+    l -= l.max(1, keepdims=True); e = np.exp(l)
+    return e / np.maximum(e.sum(1, keepdims=True), 1e-12)
+
+_wts = Counter(chosen); _tot = sum(_wts.values())
+TEMP = {}
+for t in _wts:                                   # kalibrasi: minimalkan NLL, bukan F1
+    _bT, _bN = 1.0, float("inf")
+    for T in (0.5, 0.7, 0.85, 1.0, 1.25, 1.5, 2.0, 3.0):
+        q = _temp(oof_by[t], T)
+        n = float(-np.log(np.maximum(q[mask, ytrue[mask]], 1e-12)).mean())
+        if n < _bN: _bT, _bN = T, n
+    TEMP[t] = _bT
+print("  suhu terpilih: " + "  ".join(f"{t}={TEMP[t]:.2f}" for t in _wts))
+
+def _fuse(src, prod):
+    a = np.zeros_like(next(iter(src.values())))
+    for t, k in _wts.items():
+        a += (k/_tot) * (np.log(np.maximum(src[t], 1e-12)) if prod else src[t])
+    if prod: a = np.exp(a - a.max(1, keepdims=True))
+    return a / np.maximum(a.sum(1, keepdims=True), 1e-12)
+
+_oc = {t: _temp(oof_by[t], TEMP[t]) for t in _wts}
+_tc = {t: _temp(test_by[t], TEMP[t]) for t in _wts}
+CAND = {"rata-rata":            (lambda: _fuse(oof_by, 0), lambda: _fuse(test_by, 0)),
+        "rata-rata+kalibrasi":  (lambda: _fuse(_oc,    0), lambda: _fuse(_tc,    0)),
+        "produk":               (lambda: _fuse(oof_by, 1), lambda: _fuse(test_by, 1)),
+        "produk+kalibrasi":     (lambda: _fuse(_oc,    1), lambda: _fuse(_tc,    1))}
+_base_f = popf1(_fuse(oof_by, 0), mask); _pick, _pf = "rata-rata", _base_f
+for nm, (fo, _) in CAND.items():
+    f = popf1(fo(), mask)
+    mark = "" if nm == "rata-rata" else ("  <- unggul" if f > _base_f + 0.002 else "")
+    print(f"  {nm:22s} OOF {f:.4f}{mark}")
+    if nm != "rata-rata" and f > _pf + 0.002: _pick, _pf = nm, f
+print(f"  -> dipakai: {_pick} (OOF {_pf:.4f}); default hanya diganti kalau unggul > 0.002")
+if len(_wts) == 1: print("  (ensemble cuma 1 model -> fusi tidak berpengaruh)")
+oof, test_prob = CAND[_pick][0](), CAND[_pick][1]()
+
 prior = cnt / cnt.sum()
 
 # --- tau logit-adjustment SENGAJA DIBUANG. Di v3.1 ia terpilih pada gain
