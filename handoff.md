@@ -722,3 +722,25 @@ Masalahnya BUKAN long-tailed (2,53× itu ringan) dan BUKAN derau semata. Yang
 perlu dicari adalah literatur tentang: shortcut learning / debiasing, subpopulation
 shift, invariant risk minimization, feature-space domain adaptation, dan
 pembelajaran dengan label bernoise — bukan literatur imbalance.
+
+### 1h. Uji kanonikalisasi: memisahkan dua pintasan yang berbeda
+
+Hipotesis: kalau train dan test dibinarisasi dengan algoritma yang SAMA (Otsu),
+pintasan fotometrik (binarisasi/warna/aras abu) hilang dan jarak domain menutup.
+
+| fitur yang dipakai | | pintasan macro-F1 | AUC domain |
+|---|---|---|---|
+| tanpa ukuran/AR | apa adanya | 0.6477 | 0.9110 |
+| tanpa ukuran/AR | **setelah Otsu di SEMUA** | **0.2176** | **0.5955** |
+| semua fitur | apa adanya | 0.8344 | 0.9220 |
+| semua fitur | setelah Otsu di SEMUA | 0.7504 | 0.7746 |
+
+Kesimpulan: ada **DUA pintasan yang terpisah**, dan keduanya butuh obat berbeda.
+
+1. **Pintasan fotometrik** (binarisasi, warna, kekayaan aras abu). Kanonikalisasi
+   Otsu pada train DAN test hampir menghabisinya: 0.6477 -> 0.2176 (tebak acak
+   0.143), dan AUC domain jatuh 0.9110 -> 0.5955, yaitu dua domain jadi nyaris
+   tak terbedakan. Murah, deterministik, tanpa pelatihan tambahan.
+2. **Pintasan geometri** (lebar, tinggi, aspect ratio). Otsu TIDAK menyentuhnya:
+   dengan ukuran/AR ikut dipakai, pintasan masih 0.7504 dan AUC domain 0.7746.
+   Ini butuh obat lain (jitter aspect ratio yang agresif, atau ubin ber-AR tetap).
