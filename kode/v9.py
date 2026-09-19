@@ -51,9 +51,13 @@ MAXSIDE = 1600      # gambar terbesar 5664x4248 -> perkecil dulu biar loading ta
 GRAYSCALE = True                      # matikan sumbu warna
 # DIKEMBALIKAN ke setelan v6. BUKTI LEADERBOARD: v6 (blur 0.6-2.2) = 0.83902,
 # v7 (blur 0.18-0.66, "dikalibrasi" ke statistik test) = 0.83422. Kalibrasi ke
-# tingkat korupsi test justru MENURUNKAN skor 0.0048. Ini sejalan dgn literatur
-# ketahanan korupsi (AugMix/AugMax/DeepAugment): augmentasi latih harus LEBIH
-# KERAS dari korupsi uji, bukan menyamainya. SEV menaikkan/menurunkan serempak.
+# tingkat korupsi test justru MENURUNKAN skor 0.0048.
+# KOREKSI KLAIM: versi sebelumnya komentar ini menulis "sejalan dgn literatur
+# (AugMix/AugMax/DeepAugment)". Itu KELIRU. Mintun dkk. (arXiv 2102.11273,
+# NeurIPS 2021) justru menemukan yang SEBALIKNYA: robustness paling baik saat
+# augmentasi latih PERSEPTUAL MIRIP dgn korupsi uji - yang berarti v7 seharusnya
+# menang, padahal kalah. Jadi satu-satunya dasar setelan ini adalah pengukuran
+# LB kita sendiri (n=1 pasang run), bukan literatur. SEV utk menguji arahnya.
 SEV = 1.0                             # 1.0 = setelan v6; coba 1.3 utk lebih keras
 DEGRADE = dict(p_blur=0.70, blur=(0.6*SEV, 2.2*SEV),
                p_contrast=0.60, contrast=(0.45, 0.95),
