@@ -40,6 +40,10 @@ RUNS = [
          h=320, w=320, tta=1, lr=3e-4),
     dict(tag="cnx-wide",  backbone="convnext_tiny.in12k_ft_in1k",       view="letterbox",
          h=160, w=640, tta=1, lr=1e-4),
+    # [#166] kepala ArcFace sub-center: geometri keputusan yang BEDA sama sekali
+    # dari 4 run di atas, jadi ensemble punya sesuatu yang benar-benar berbeda.
+    dict(tag="arc-384",   backbone="convnext_tiny.in12k_ft_in1k",       view="letterbox",
+         h=384, w=384, tta=1, lr=1e-4, head="arcface"),
 ]
 SPEC = dict(enable=True, backbone="convnext_tiny.in12k_ft_in1k", view="letterbox",
             h=384, w=384, tta=1, lr=1e-4, epochs=22)   # spesialis pasangan tersulit
@@ -66,6 +70,13 @@ DEGRADE = dict(p_blur=0.70, blur=(0.6*SEV, 2.2*SEV),
 # AugMax-style (Wang et al. NeurIPS 2021): campuran BEBERAPA rantai augmentasi
 # jauh lebih beragam daripada satu rantai. Diversity + hardness, bukan salah satu.
 AUGMAX = dict(enable=True, p=0.35, chains=3)
+# [#122 Tent / #121 MEMO] Test-Time Adaptation: satu-satunya metode di daftar Anda
+# yang menyerang LANGSUNG masalah utama kita (pergeseran domain train->test).
+# Hanya parameter lapisan normalisasi yang diperbarui, dgn tujuan meminimalkan
+# ENTROPI prediksi di data TEST - tidak butuh label. Berbahaya (bisa kolaps ke
+# satu kelas), jadi DIGERBANGI: diuji dulu di validasi yang sengaja dirusak
+# menyerupai test; dipakai hanya kalau di sana terbukti menolong.
+TENT = dict(enable=True, steps=1, lr=1e-3, gain=0.005)
 CFG = dict(n_folds=5, epochs=18, batch=32, wd=0.05, ls=0.05, nw=2, ema=0.999)
 SEED = 42
 def seed_all(s=SEED):
@@ -338,9 +349,9 @@ def augmax(im):
     return Image.fromarray(np.clip((1-m)*a + m*mix, 0, 255).astype(np.uint8))
 
 class ScriptDS(Dataset):
-    def __init__(s, df, r, train, view=0, nview=1):
+    def __init__(s, df, r, train, view=0, nview=1, sim=False):
         s.p = df.path.tolist(); s.y = df.y.tolist() if "y" in df else [0]*len(df)
-        s.r, s.t, s.v, s.n = r, train, view, nview
+        s.r, s.t, s.v, s.n, s.sim = r, train, view, nview, sim
     def __len__(s): return len(s.p)
     def __getitem__(s, i):
         try:
@@ -351,19 +362,47 @@ class ScriptDS(Dataset):
         if s.t:
             im = augmax(im) if (AUGMAX["enable"] and random.random() < AUGMAX["p"]) \
                  else degrade(im)
+        elif s.sim:
+            im = degrade(im)          # tiru domain TEST utk menguji adaptasi
         if GRAYSCALE: im = im.convert("L").convert("RGB")   # train DAN test
         return (AUG if s.t else PLAIN)(prep(im, s.r, s.t, s.v, s.n)), s.y[i]
 
 # ----------------------------- 4. MODEL --------------------------------------
+# [#166 ArcFace / sub-center ArcFace] Kepala sudut, bukan linear biasa. Alih-alih
+# hyperplane, tiap kelas jadi ARAH di hipersfer dan diberi margin sudut, sehingga
+# kelas yang mirip (jawi vs pegon: dua-duanya turunan Arab) dipaksa terpisah.
+# 'sub-center' k=3: satu kelas boleh punya 3 pusat, berguna karena satu aksara di
+# sini muncul dalam beberapa gaya (manuskrip, cetak, tulisan tangan).
+class ArcFace(nn.Module):
+    def __init__(s, in_f, nc, m=0.30, sc=30.0, k=3):
+        super().__init__()
+        s.W = nn.Parameter(torch.randn(nc*k, in_f) * 0.01)
+        s.nc, s.k, s.m, s.sc = nc, k, m, sc
+    def forward(s, x, y=None):
+        cos = nn.functional.linear(nn.functional.normalize(x, dim=1),
+                                   nn.functional.normalize(s.W, dim=1))
+        cos = cos.view(-1, s.nc, s.k).max(2).values          # sub-center: ambil pusat terdekat
+        if y is None: return cos * s.sc                      # inferensi: tanpa margin
+        th = torch.acos(cos.clamp(-1 + 1e-7, 1 - 1e-7))
+        oh = torch.zeros_like(cos); oh.scatter_(1, y.view(-1, 1), 1.0)
+        return torch.cos(th + s.m * oh) * s.sc               # margin hanya di kelas benar
+
+class ArcNet(nn.Module):
+    def __init__(s, body, feat, nc):
+        super().__init__(); s.body, s.head, s.is_arc = body, ArcFace(feat, nc), True
+    def forward(s, x, y=None): return s.head(s.body(x), y)
+
 _OK = {}                       # cache: jangan coba unduh ulang tiap fold kalau sudah gagal
-def build(name, nc):
+def build(name, nc, head="linear"):
     """Coba timm (pretrained) -> torchvision -> random init. Kembalikan (model, pretrained?)."""
     import torchvision.models as tvm
+    arc = (head == "arcface")
     if _OK.get(name, True):
         try:
             import timm
-            m = timm.create_model(name, pretrained=True, num_classes=nc)
-            _OK[name] = True; return m, True
+            m = timm.create_model(name, pretrained=True, num_classes=(0 if arc else nc))
+            _OK[name] = True
+            return (ArcNet(m, m.num_features, nc), True) if arc else (m, True)
         except Exception as e:
             _OK[name] = False
             print(f"    ! {name} tak bisa diunduh ({type(e).__name__}) -> fallback resnet34")
@@ -371,7 +410,10 @@ def build(name, nc):
         m = tvm.resnet34(weights=tvm.ResNet34_Weights.IMAGENET1K_V1); pre = True
     except Exception:
         m = tvm.resnet34(weights=None); pre = False
-    m.fc = nn.Linear(m.fc.in_features, nc); return m, pre
+    feat = m.fc.in_features
+    if arc:
+        m.fc = nn.Identity(); return ArcNet(m, feat, nc), pre
+    m.fc = nn.Linear(feat, nc); return m, pre
 
 class EMA:
     """Polyak averaging - bobot rata-rata jauh lebih stabil drpd bobot epoch terakhir."""
@@ -419,11 +461,11 @@ def is_collapsed(pred, f1):
     return bool(share > 0.90 or f1 < 0.10)
 
 @torch.no_grad()
-def predict(model, df, r, tta=None):
+def predict(model, df, r, tta=None, sim=False):
     nv = tta or r["tta"]; acc = np.zeros((len(df), NC)); model.eval()
     for k in range(nv):
         out = []
-        for x, _ in DataLoader(ScriptDS(df, r, False, k, nv), batch_size=CFG["batch"]*2,
+        for x, _ in DataLoader(ScriptDS(df, r, False, k, nv, sim), batch_size=CFG["batch"]*2,
                                shuffle=False, num_workers=CFG["nw"]):
             x = x.to(DEV, non_blocking=True)
             with torch.autocast(DEV, torch.float16, enabled=(DEV == "cuda")):
@@ -431,13 +473,57 @@ def predict(model, df, r, tta=None):
         acc += np.concatenate(out)
     return acc / nv
 
+def tent_adapt(model, df, r, sim=False):
+    """[#122 Tent] Perbarui HANYA parameter lapisan normalisasi supaya entropi
+    prediksi di data target turun. Tanpa label. Model asli tidak disentuh."""
+    import copy
+    m = copy.deepcopy(model)
+    norms = [q for q in m.modules()
+             if isinstance(q, (nn.BatchNorm2d, nn.LayerNorm, nn.GroupNorm))]
+    for p in m.parameters(): p.requires_grad_(False)
+    ps = []
+    for q in norms:
+        if isinstance(q, nn.BatchNorm2d):      # pakai statistik BATCH TARGET
+            q.track_running_stats = False; q.running_mean = None; q.running_var = None
+        for p in q.parameters(recurse=False):
+            p.requires_grad_(True); ps.append(p)
+    if not ps:
+        del m; return model                    # tak ada lapisan norm -> tak bisa diadaptasi
+    opt = torch.optim.SGD(ps, lr=TENT["lr"], momentum=0.9)
+    m.train()
+    for _ in range(TENT["steps"]):
+        for x, _y in DataLoader(ScriptDS(df, r, False, 0, 1, sim), batch_size=CFG["batch"],
+                                shuffle=False, num_workers=CFG["nw"]):
+            x = x.to(DEV, non_blocking=True)
+            opt.zero_grad(set_to_none=True)
+            lo = m(x).float()
+            ent = -(torch.softmax(lo, 1) * torch.log_softmax(lo, 1)).sum(1).mean()
+            ent.backward(); opt.step()
+    return m
+
+def tent_gate(model, dva, r):
+    """Gerbang JUJUR: uji Tent di validasi yang sengaja dirusak menyerupai test.
+    Kalau di sana tidak menolong, jangan dipakai pada test sungguhan."""
+    b = predict(model, dva, r, 1, sim=True)
+    fb = f1_score(dva.y, b.argmax(1), average="macro")
+    m2 = tent_adapt(model, dva, r, sim=True)
+    a = predict(m2, dva, r, 1, sim=True)
+    fa = f1_score(dva.y, a.argmax(1), average="macro")
+    col = is_collapsed(a.argmax(1), fa)
+    del m2
+    if DEV == "cuda": torch.cuda.empty_cache()
+    ok = (fa > fb + TENT["gain"]) and not col
+    print(f"  gerbang Tent (validasi dirusak): {fb:.4f} -> {fa:.4f}"
+          f"{'  KOLAPS' if col else ''}  -> {'PAKAI' if ok else 'tolak'}")
+    return ok
+
 def train_fold(r, dtr, dva, lr, epochs, seed):
     seed_all(seed)
     # drop_last hanya kalau datanya cukup, kalau tidak len(ld) bisa 0 -> scheduler pecah
     ld = DataLoader(ScriptDS(dtr, r, True), batch_size=CFG["batch"], shuffle=True,
                     num_workers=CFG["nw"], drop_last=(len(dtr) >= 2*CFG["batch"]),
                     pin_memory=(DEV == "cuda"))
-    model, _ = build(r["backbone"], NC); model = model.to(DEV)
+    model, _ = build(r["backbone"], NC, r.get("head", "linear")); model = model.to(DEV)
     crit = nn.CrossEntropyLoss(weight=CW, label_smoothing=CFG["ls"])
     opt = torch.optim.AdamW(param_groups(model, lr, CFG["wd"]), lr=lr, weight_decay=CFG["wd"])
     total_steps = max(10, epochs * max(1, len(ld)))   # OneCycleLR pecah kalau terlalu kecil
@@ -451,7 +537,8 @@ def train_fold(r, dtr, dva, lr, epochs, seed):
             x, y = x.to(DEV, non_blocking=True), y.to(DEV, non_blocking=True)
             opt.zero_grad(set_to_none=True)
             with torch.autocast(DEV, torch.float16, enabled=(DEV == "cuda")):
-                loss = crit(model(x), y)
+                lo = model(x, y) if getattr(model, "is_arc", False) else model(x)
+                loss = crit(lo, y)
             scaler.scale(loss).backward()
             scaler.unscale_(opt)
             nn.utils.clip_grad_norm_(model.parameters(), 1.0)          # cegah divergensi
@@ -480,6 +567,7 @@ FOLDS = list(skf.split(tr_df, tr_df.y))
 for r in RUNS:
     oof = np.zeros((len(tr_df), NC)); tp = np.zeros((len(te_df), NC))
     f1s, dead, used = [], 0, 0
+    use_tent = None                       # None = belum diuji gerbangnya
     print(f"\n--- {r['tag']}: {r['backbone']} | {r['view']} {r['h']}x{r['w']} | lr={r['lr']:.0e} ---")
     for fold, (itr, iva) in enumerate(FOLDS):
         dtr, dva = tr_df.iloc[itr].reset_index(drop=True), tr_df.iloc[iva].reset_index(drop=True)
@@ -495,7 +583,19 @@ for r in RUNS:
         if bad:                                                        # tetap mati -> BUANG
             dead += 1; print(f"  fold{fold} tetap kolaps -> DIKELUARKAN dari ensemble")
             del model; torch.cuda.empty_cache() if DEV == "cuda" else None; continue
-        oof[iva] = predict(model, dva, r); tp += predict(model, te_df, r); used += 1
+        if TENT["enable"] and use_tent is None: use_tent = tent_gate(model, dva, r)
+        oof[iva] = predict(model, dva, r)
+        if use_tent:
+            mt = tent_adapt(model, te_df, r)          # adaptasi ke TEST sungguhan
+            pt = predict(mt, te_df, r)
+            if is_collapsed(pt.argmax(1), 1.0):       # pengaman terakhir
+                print(f"  fold{fold} Tent kolaps di test -> pakai prediksi tanpa Tent")
+                pt = predict(model, te_df, r)
+            del mt
+            if DEV == "cuda": torch.cuda.empty_cache()
+        else:
+            pt = predict(model, te_df, r)
+        tp += pt; used += 1
         f1s.append(f1); print(f"  fold{fold} macro-F1={f1:.4f}")
         del model
         if DEV == "cuda": torch.cuda.empty_cache()
