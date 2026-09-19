@@ -641,3 +641,84 @@ Yang harus diperhatikan di output:
 
 Kalau waktu GPU terbatas, kurangi isi `RUNS` — buang entri dengan OOF terendah,
 **jangan** membuang guard kolaps atau pemilihan berbasis OOF.
+
+---
+
+## 1g. Inventaris masalah dataset (diukur ulang langsung dari gambar)
+
+Diukur pada dataset kompetisi yang BENAR (train 3.771, test 1.220 — diverifikasi
+lewat irisan `image_id` dengan submission yang sudah pernah diskor di LB).
+
+**Peringatan proses:** ada dua versi dataset di lingkungan kerja ini. Folder
+`data/` (4.468 train / 1.118 test) BUKAN data kompetisi — irisan `image_id`-nya
+dengan submission ber-skor = 0. Diagnostik pertama saya berjalan di sana dan
+menghasilkan kesimpulan "train dan test identik" yang **salah total**. Selalu
+verifikasi dengan irisan `image_id` terhadap submission ber-skor sebelum
+menyimpulkan apa pun.
+
+### Temuan utama: pintasan non-aksara hampir sekuat modelnya
+
+RandomForest yang HANYA melihat metadata — lebar, tinggi, aspect ratio, saturasi,
+derajat binarisasi, oklusi — **tanpa melihat bentuk aksara sama sekali**:
+
+| | macro-F1 |
+|---|---|
+| tebak acak | 0.143 |
+| **metadata saja (5-fold CV di train)** | **0.7826** |
+| model terbaik kita (LB) | 0.839 |
+
+Fitur terpenting: `bil` (binarisasi) 0.25, `W` 0.24, `AR` 0.22, `H` 0.18.
+
+Dan pintasan itu **runtuh di test**: AUC pembeda domain train-vs-test dari
+metadata yang sama = **0.9169**. Artinya justru fitur yang paling memprediksi
+kelas di train adalah fitur yang paling bergeser ke test.
+
+### Jarak domain terukur
+
+| indikator | train | test | |
+|---|---|---|---|
+| berwarna (saturasi ≥ 2) | 4.7% | **64.2%** | 13,7× |
+| hampir 2-aras (hasil binarisasi) | 35.9% | **7.0%** | 0,19× |
+| oklusi/overlay datar > 2% area | 2.1% | **26.9%** | 12,8× |
+| ketajaman (var Laplacian ternormalisasi, p50) | 48.5 | 22.0 | 0,45× |
+| derau frekuensi tinggi (p50) | 0.077 | 0.152 | 2,0× |
+| byte per piksel | 0.121 | 0.737 | 6,1× |
+| aspect ratio p50 | 6.75 | 3.08 | 0,46× |
+| strip (AR≥3) | 67.1% | 50.8% | |
+| JPEG | 4.2% | 21.0% | |
+
+### Binarisasi dan AR adalah pintasan per-kelas
+
+| kelas | n | % | 2-aras% | berwarna% | AR p50 |
+|---|---|---|---|---|---|
+| bali | 396 | 10.5 | 27.5 | 4.8 | 19.19 |
+| jawa | 703 | 18.6 | 7.1 | 9.0 | 9.53 |
+| jawi | 781 | 20.7 | 48.1 | 2.2 | 6.05 |
+| lampung | 505 | 13.4 | 33.3 | 4.4 | 3.34 |
+| lontara | 404 | 10.7 | 6.4 | 3.7 | 16.88 |
+| pegon | 309 | 8.2 | **67.0** | 11.3 | **1.16** |
+| sunda | 673 | 17.8 | 62.1 | 0.9 | 3.51 |
+
+Imbalance mayoritas/minoritas = 781/309 = **2.53×** (KOREKSI: sebelumnya saya
+sebut 1,2× — itu dari dataset yang salah).
+
+### Masalah lain yang terlihat langsung dari gambar
+
+1. **Sampel yang tidak mungkin dipelajari.** Ada gambar train berlabel `jawi`
+   yang isinya hanya teks Latin `"a.  Kepri"`, dan banyak yang isinya hanya
+   angka Arab-Hindi (`٢٢٨`, `١١٢`, `٧`, `٣٥١`) — angka itu dipakai baik oleh
+   jawi maupun pegon, jadi secara definisi ambigu.
+2. **Gambar non-manuskrip.** Thumbnail YouTube berisi wajah orang ("Menghafal
+   Aksara Jawa Itu MUDAH"), poster pemasaran berbahasa Indonesia, tabel aksara
+   dari stok foto lengkap dengan watermark, foto prasasti batu.
+3. **Teks Latin ikut terlihat** di sebagian gambar ("AKSARA JAWA", "SAYA MAU
+   TIDUR") — pintasan yang bisa dipelajari model dan tidak konsisten.
+4. **Kebocoran train→test: 2 gambar test identik byte dengan gambar train.**
+   Duplikat persis di dalam train: 0.
+
+### Implikasi arah pencarian metode
+
+Masalahnya BUKAN long-tailed (2,53× itu ringan) dan BUKAN derau semata. Yang
+perlu dicari adalah literatur tentang: shortcut learning / debiasing, subpopulation
+shift, invariant risk minimization, feature-space domain adaptation, dan
+pembelajaran dengan label bernoise — bukan literatur imbalance.
