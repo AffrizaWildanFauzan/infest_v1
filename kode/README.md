@@ -34,3 +34,24 @@ terbesar (+0.024). Kalau menjalankan v6/v7, abaikan vonisnya.
 
 Latar belakang lengkap, termasuk metode yang sudah diuji dan gugur, ada di
 `../handoff.md`.
+
+
+## v9 — perombakan (BELUM diuji di LB)
+
+`v9.py`. Perubahan dari v8, semuanya berdasar bukti leaderboard/pengukuran:
+
+1. **`heightnorm` dibuang total.** Pada populasi `blok` (AR<3, ~49% test)
+   letterbox F1 0.94 vs heightnorm 0.82; greedy tidak pernah memilih heightnorm.
+2. **`DEGRADE` dikembalikan ke setelan v6.** v6 = 0.83902, v7 (kalibrasi ke
+   statistik test) = 0.83422. Kalibrasi menurunkan skor 0.0048. Knob `SEV`
+   ditambahkan untuk menaikkan/menurunkan severitas serempak.
+3. **AugMax** (Wang dkk., NeurIPS 2021): campuran 3 rantai augmentasi acak
+   dengan bobot Dirichlet, p=0.35.
+4. **Ensemble penuh dipaksa diuji** saat greedy runtuh ke satu model (terjadi di
+   v6/v7/v8, membuang 4 dari 5 run).
+5. **Optimasi bobot per-kelas untuk macro-F1** (coordinate ascent), ditala di
+   OOF tertimbang, dipakai hanya kalau naik > 0.002.
+
+Status: hanya lolos smoke test (data sintetis, CPU). Belum pernah dijalankan di
+data kompetisi. Perubahan dengan keyakinan tertinggi adalah nomor 2 (senilai
++0.0048 terukur); sisanya belum terukur.
